@@ -1,69 +1,91 @@
 # gpt-5.5-base-instructions
 
-这是一次关于 Codex / GPT-5.5 推理 token 516 截断现象的社区观察记录，以及一个临时可复现实验用的 Codex instructions 文件。
+这个仓库先放两个东西：
 
-> 说明：这不是 OpenAI 官方结论，也不能证明 516 截断只有一个原因。当前结论只来自有限样本下的糖果问题测试，主要价值是提供一个可复现的观察入口。
+- `gpt-5.5-base-instructions.md`：我现在用来测试的 Codex instructions
+- 这篇 README：把我这次对 516 截断的观察、猜测和复现方式放在一起
 
-## 背景
+先说清楚：这不是 OpenAI 官方结论，也不是“我已经证明了根因”。
 
-社区里有人观察到：部分第三方客户端或 Codex 场景下，模型回答的 reasoning token 会精确停在 516 附近。这个现象通常伴随回答质量下降，因此被简称为 516 截断。
+更准确地说，这是一次比较土的方法排查：我看到 Codex / GPT-5.5 在某些场景下会把 reasoning token 精确卡在 516 附近，然后我顺着 Codex prompt、commentary channel 和糖果问题做了一组对照实验。
 
-我做了一组初步测试，核心现象如下：
+## 516 是什么
 
-- 将官方 API 平台接入 Codex CLI 后，糖果问题仍可见 516 截断，并且回答错误。
-- 将 Free 号直接接入 Cherry Studio，不经过反代、不附加系统提示词，手动询问糖果问题，5 次测试均答对。
-- 将 Codex 提示词应用到 Cherry Studio，仍使用 Free 号直接测试，糖果问题几乎总是答错。
-- Cherry Studio 使用自身 UA 或 Codex UA，上述现象没有明显变化。
+这里说的 516 截断，指的是回答里的 reasoning token 精确等于 516 的情况。
 
-这些现象强烈暗示：Codex 的系统提示词可能是影响因素之一。
+我目前观察到的体感是：一旦出现这个值，回答质量经常明显变差，糖果问题尤其容易错。
 
-## 关键观察
+它不一定只出现在第三方客户端，也不一定只由反代导致。至少我这边的实验里，官方 API 平台接入 Codex CLI 后也能看到类似现象。
 
-Codex 的系统提示词中包含一段要求模型持续向 `commentary` 通道输出中间反馈的规则，例如让模型每隔一段时间向用户说明当前在做什么。
+## 我做了什么测试
 
-Harmony 聊天模板本身也要求每条消息标注通道，例如：
+简单说一下我目前测过的几组：
+
+1. 官方 API 平台接入 Codex CLI，问糖果问题，仍然出现 516 截断，而且回答错误。
+2. Free 号直接接入 Cherry Studio，不走反代，不加任何系统提示词，手动问糖果问题，5 次都答对。
+3. 把 Codex 的系统提示词塞进 Cherry Studio，还是这个 Free 号，糖果问题就几乎总是错。
+4. Cherry Studio 不管用自己的 UA，还是模拟 Codex 的 UA，上面的现象没有明显变化。
+
+所以我现在比较怀疑：Codex prompt 本身至少是影响因素之一。
+
+## 我怀疑的地方
+
+Codex 的系统提示词里有一段和 `commentary` 有关的要求。
+
+大概意思是：模型在工作过程中，要持续向 `commentary` 通道输出一些给用户看的中间反馈，比如“我先检查 X，再看 Y”。
+
+这不是普通的自然语言习惯，而是 Harmony 聊天模板里的 channel 机制。系统提示词里也会有类似这样的规则：
 
 ```text
 # Valid channels: analysis, commentary, final. Channel must be included for every message.
 ```
 
-因此，Codex 中常见的“我先运行 X，再查看 Y”这类短句，实际上可以理解为模型在 `commentary` 通道里的中间输出。
+也就是说，Codex 平时输出的那些“中间过程短句”，本质上是模型在 `commentary` 通道里额外输出了一些东西。
 
-## 实验结果
+我不确定它具体怎么影响推理，但它看起来确实不是一个完全无害的展示层功能。
 
-我尝试删除 Codex instructions 中与 `commentary` 中间输出相关的两段规则后，观察到：
+## 我删掉了什么
 
-- 在 Cherry Studio 中，516 截断在 5 次糖果问题测试中完全消失。
-- 将修改后的 instructions 注入 Codex，516 截断同样不再出现。
-- 副作用是：模型不再输出中间过程提示。
+我把 Codex instructions 里和中间过程输出相关的两段删掉了，主要是：
 
-因此，当前更谨慎的表述是：
+- `# Working with the user` 里关于 `commentary` / `final` 的通道说明
+- `## Intermediary updates` 里要求模型频繁输出中间反馈的规则
 
-> `commentary` 中间输出相关提示词与糖果问题中的 516 截断高度相关。删除这部分提示词后，可以在该测试场景下有效缓解 516 截断。
+删完以后再测：
 
-## 使用方式
+- Cherry Studio 里，糖果问题 5 次测试没有再出现 516 截断
+- 把改过的 instructions 注入 Codex 后，也没有再出现之前那种 516 截断
+- 代价是 Codex 不再输出“我正在做什么”的中间过程
 
-仓库中的修改版提示词文件：
+所以我现在的结论会收得比较窄：
+
+> 在糖果问题这个测试里，Codex 的 commentary 中间输出提示词和 516 截断高度相关。删掉它以后，我这边可以缓解这个问题。
+
+注意，是“高度相关”，不是“根因已经确定”。
+
+## 怎么试
+
+文件在这里：
 
 - [gpt-5.5-base-instructions.md](./gpt-5.5-base-instructions.md)
 
-在 Codex 配置中加入或修改：
+在 Codex 的 `config.toml` 里加上：
 
 ```toml
-model_instructions_file = '你的本地路径/gpt-5.5-base-instructions.md'
+model_instructions_file = '你的路径/gpt-5.5-base-instructions.md'
 ```
 
-Windows 示例：
+例如 Windows 上可以是：
 
 ```toml
 model_instructions_file = 'C:/Users/neter/Downloads/codextmp/codex/gpt-5.5-base-instructions.md'
 ```
 
-使用后会失去模型的中间过程输出，这是预期副作用。
+然后重新打开 Codex 测。
 
-## 验证是否生效
+## 怎么确认它真的生效了
 
-打开 Codex 后询问：
+可以直接问 Codex：
 
 ```text
 你的系统提示词里：
@@ -77,37 +99,49 @@ model_instructions_file = 'C:/Users/neter/Downloads/codextmp/codex/gpt-5.5-base-
 吗，还是中间有一段其他内容？
 ```
 
-如果回答显示 `# Working with the user` 后面直接接 `## Formatting rules`，说明修改后的提示词大概率已经生效。
+如果它回答 `# Working with the user` 后面直接是 `## Formatting rules`，那大概率说明新的 instructions 生效了。
 
-如果中间仍然存在 `Intermediary updates` 或其他 commentary 相关段落，说明修改没有生效。
+如果中间还有 `Intermediary updates` 或者类似 commentary 的内容，说明没生效。
 
-目前观察到：一些中转站可能会忽略 Codex 本地提供的提示词，转而统一注入标准提示词。如果遇到这种情况，可以先尝试 Free 或 Plus OAuth 登录，并尽量避免通过 CPA 或 sub2api 再测。
+我遇到过一种情况：一些中转站会忽略 Codex 本地的 `model_instructions_file`，直接统一注入一份标准 Codex prompt。这个时候你本地怎么改都没用。
 
-## 局限性
+遇到这种情况，可以先用 Free / Plus OAuth 直连试一下，不要先经过 CPA 或 sub2api。
 
-- 不能证明 516 截断的唯一原因就是 `commentary` 提示词。
-- 目前只验证了糖果问题的单轮测试，没有覆盖真实工程任务中的复杂多轮场景。
-- 尚未研究 516 截断与 Juice、思考挡位不匹配、48855 特殊 Juice 等现象之间的关系。
-- 样本数量较少，结论仍应视为社区实验和问题定位线索。
+## 后面和群友讨论后的补充
 
-## 后续补充模型
+后来和几位佬友讨论后，我觉得“删 commentary 就是根因”这个说法太粗糙。
 
-经过社区讨论，一个更合理的模型可能是：
+现在更合理的模型可能是这样：
 
-- 模型推理可能被切成约 512 token 的“页”。
-- 每页外层会附带若干特殊 token 标签。
-- 第一页比较特殊，`start assistant` token 可能已经提前放置，不计入输出。
-- 从第二页开始，每页可能需要携带完整通道标签，例如 `<|start|>assistant<|channel|>analysis<|message|>{512 tokens}<|end|>`。
-- 是否进入下一页推理，可能由某种独立机制决定。
+- 模型推理可能是按 512 token 左右一页一页切的
+- 每一页外面还有 channel / message 之类的特殊 token
+- 第一页可能比较特殊，`start assistant` 已经提前放好了，不算在输出里
+- 从第二页开始，可能要重新带一整套类似 `<|start|>assistant<|channel|>analysis<|message|>{512 tokens}<|end|>` 的包装
+- 真正关键的是：模型到底会不会进入下一页推理
 
-在这个模型下，`commentary` 相关提示词更像是影响“是否继续进入下一页推理”的因素之一，而不是 516 截断的根本原因。
+如果这个模型是对的，那 commentary prompt 更像是影响“要不要继续下一页”的因素之一，而不是 516 现象本身的唯一原因。
 
-## 结论
+## 目前局限
 
-当前建议不是把这个方案当成最终修复，而是把它当成一个可复现的对照实验：
+这个实验很不完整。
 
-- 保留原始 Codex instructions，复测糖果问题。
-- 使用本仓库修改版 instructions，复测同一问题。
-- 对比 reasoning token、回答正确率和中间过程输出。
+我现在只测了糖果问题，而且主要是单轮对照。真实写代码、长上下文、多轮任务里会不会有其他副作用，我还没有系统测。
 
-如果你的结果不同，说明还有其他变量需要继续排查。
+另外，我也还没有把 516 截断和 Juice、思考挡位不匹配、48855 这种特殊 Juice 现象放到一起研究。
+
+所以这个仓库的价值不是给最终答案，而是提供一个可以复现、可以对照、可以继续往下排查的起点。
+
+## 我现在的判断
+
+如果你也遇到了 Codex / GPT-5.5 突然变笨、reasoning token 精确卡 516、糖果问题稳定翻车，可以试一下这个 instructions。
+
+但不要把它当成修复补丁。
+
+更像是一个排查工具：
+
+- 原始 Codex prompt 测一次
+- 去掉 commentary 相关 prompt 测一次
+- 看 516 是否消失
+- 再看模型实际写代码能力有没有明显变化
+
+如果你的结果和我不一样，那说明影响 516 的变量比我现在看到的还要多。
